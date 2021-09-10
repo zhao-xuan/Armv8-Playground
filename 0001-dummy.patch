@@ -1,0 +1,106 @@
+From 21fb08016bc5bdafea4d4e03432ef14af026c471 Mon Sep 17 00:00:00 2001
+From: Xuan Zhao <xuan.zhao@arm.com>
+Date: Tue, 7 Sep 2021 22:20:56 +0100
+Subject: [PATCH 1/2] dummy
+
+---
+ arch/arm64/kernel/entry-common.c  | 10 ++++++++++
+ include/uapi/asm-generic/unistd.h | 10 +++++++++-
+ kernel/sys.c                      | 16 ++++++++++++++++
+ 3 files changed, 35 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm64/kernel/entry-common.c b/arch/arm64/kernel/entry-common.c
+index 32f9796c4ffe..c78479e4b444 100644
+--- a/arch/arm64/kernel/entry-common.c
++++ b/arch/arm64/kernel/entry-common.c
+@@ -25,6 +25,11 @@
+ #include <asm/sysreg.h>
+ #include <asm/system_misc.h>
+ 
++extern int el0_exception_count;
++extern int el1_exception_count;
++
++
++
+ /*
+  * Handle IRQ/context state management when entering from kernel mode.
+  * Before this function is called it is not safe to call regular kernel code,
+@@ -37,6 +42,8 @@ static __always_inline void __enter_from_kernel_mode(struct pt_regs *regs)
+ {
+ 	regs->exit_rcu = false;
+ 
++	el1_exception_count++;
++
+ 	if (!IS_ENABLED(CONFIG_TINY_RCU) && is_idle_task(current)) {
+ 		lockdep_hardirqs_off(CALLER_ADDR0);
+ 		rcu_irq_enter();
+@@ -99,6 +106,7 @@ static void noinstr exit_to_kernel_mode(struct pt_regs *regs)
+ static __always_inline void __enter_from_user_mode(void)
+ {
+ 	lockdep_hardirqs_off(CALLER_ADDR0);
++	el0_exception_count++;
+ 	CT_WARN_ON(ct_state() != CONTEXT_USER);
+ 	user_exit_irqoff();
+ 	trace_hardirqs_off_finish();
+@@ -154,6 +162,8 @@ static void noinstr arm64_enter_nmi(struct pt_regs *regs)
+ {
+ 	regs->lockdep_hardirqs = lockdep_hardirqs_enabled();
+ 
++	el1_exception_count++;
++
+ 	__nmi_enter();
+ 	lockdep_hardirqs_off(CALLER_ADDR0);
+ 	lockdep_hardirq_enter();
+diff --git a/include/uapi/asm-generic/unistd.h b/include/uapi/asm-generic/unistd.h
+index 14c8fe863c6d..1cfc1eb05f35 100644
+--- a/include/uapi/asm-generic/unistd.h
++++ b/include/uapi/asm-generic/unistd.h
+@@ -877,11 +877,19 @@ __SYSCALL(__NR_landlock_restrict_self, sys_landlock_restrict_self)
+ #define __NR_memfd_secret 447
+ __SYSCALL(__NR_memfd_secret, sys_memfd_secret)
+ #endif
++
+ #define __NR_process_mrelease 448
+ __SYSCALL(__NR_process_mrelease, sys_process_mrelease)
+ 
++#define __NR_get_el0_exception_count 449
++__SYSCALL(__NR_get_el0_exception_count, sys_get_el0_exception_count)
++
++#define __NR_get_el1_exception_count 450
++__SYSCALL(__NR_get_el1_exception_count, sys_get_el1_exception_count)
++
+ #undef __NR_syscalls
+-#define __NR_syscalls 449
++#define __NR_syscalls 451
++
+ 
+ /*
+  * 32 bit systems traditionally used different
+diff --git a/kernel/sys.c b/kernel/sys.c
+index 72c7639e3c98..171e95d46976 100644
+--- a/kernel/sys.c
++++ b/kernel/sys.c
+@@ -2733,3 +2733,19 @@ COMPAT_SYSCALL_DEFINE1(sysinfo, struct compat_sysinfo __user *, info)
+ 	return 0;
+ }
+ #endif /* CONFIG_COMPAT */
++
++int el0_exception_count;
++EXPORT_SYMBOL(el0_exception_count);
++
++SYSCALL_DEFINE0(get_el0_exception_count)
++{
++	return el0_exception_count;
++}
++
++int el1_exception_count;
++EXPORT_SYMBOL(el1_exception_count);
++
++SYSCALL_DEFINE0(get_el1_exception_count)
++{
++	return el1_exception_count;
++}
+\ No newline at end of file
+-- 
+2.25.1
+

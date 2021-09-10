@@ -1,0 +1,157 @@
+From 7c5c825c68227d1625a07969739d3c4f3025f1ca Mon Sep 17 00:00:00 2001
+From: Xuan Zhao <xuan.zhao@arm.com>
+Date: Fri, 10 Sep 2021 10:55:49 +0100
+Subject: [PATCH 2/2] adding get_addr_info system call
+
+---
+ include/uapi/asm-generic/unistd.h |   5 +-
+ kernel/sys.c                      | 110 ++++++++++++++++++++++++++++++
+ 2 files changed, 114 insertions(+), 1 deletion(-)
+
+diff --git a/include/uapi/asm-generic/unistd.h b/include/uapi/asm-generic/unistd.h
+index 1cfc1eb05f35..233d9359bca5 100644
+--- a/include/uapi/asm-generic/unistd.h
++++ b/include/uapi/asm-generic/unistd.h
+@@ -887,8 +887,11 @@ __SYSCALL(__NR_get_el0_exception_count, sys_get_el0_exception_count)
+ #define __NR_get_el1_exception_count 450
+ __SYSCALL(__NR_get_el1_exception_count, sys_get_el1_exception_count)
+ 
++#define __NR_get_addr_info 451
++__SYSCALL(__NR_get_addr_info, sys_get_addr_info)
++
+ #undef __NR_syscalls
+-#define __NR_syscalls 451
++#define __NR_syscalls 452
+ 
+ 
+ /*
+diff --git a/kernel/sys.c b/kernel/sys.c
+index 171e95d46976..1cfb3de27b21 100644
+--- a/kernel/sys.c
++++ b/kernel/sys.c
+@@ -71,6 +71,7 @@
+ #include <linux/uaccess.h>
+ #include <asm/io.h>
+ #include <asm/unistd.h>
++#include <asm/sysreg.h>
+ 
+ #include "uid16.h"
+ 
+@@ -2748,4 +2749,113 @@ EXPORT_SYMBOL(el1_exception_count);
+ SYSCALL_DEFINE0(get_el1_exception_count)
+ {
+ 	return el1_exception_count;
++}
++
++// The EL1 translation table base address is at TTBR1_EL1[47:12] when page size is 4KB
++#define TTBR_BADDR_MASK     (UL(0xfffffffff) << 12)
++
++// table and page descriptor address mask
++#define TT_TABLE_DESC_ADDR_MASK          (UL(0xfffffffff) << 12)
++#define TT_PAGE_DESC_ADDR_MASK           (UL(0xfffffffff) << 12)
++
++// table descriptor attributes
++#define TT_TABLE_NS_BIT(x)          ((((unsigned long) x) >> 63) & UL(0x1))
++#define TT_TABLE_AP_BIT(x)          ((((unsigned long) x) >> 61) & UL(0x3))
++#define TT_TABLE_XN_BIT(x)          ((((unsigned long) x) >> 60) & UL(0x1))
++#define TT_TABLE_PXN_BIT(x)         ((((unsigned long) x) >> 59) & UL(0x1))
++
++// the index to the translation table at different levels in a virtual address
++#define VA_L0_INDEX(x)              (((((unsigned long) x) >> 39) & UL(0x1ff)) * 8)
++#define VA_L1_INDEX(x)              (((((unsigned long) x) >> 30) & UL(0x1ff)) * 8)
++#define VA_L2_INDEX(x)              (((((unsigned long) x) >> 21) & UL(0x1ff)) * 8)
++#define VA_L3_INDEX(x)              (((((unsigned long) x) >> 12) & UL(0x1ff)) * 8)
++#define VA_BITS_FIELD(x)            (((unsigned long) x) & UL(0xfff))
++
++// page descriptor attributes
++#define TT_PAGE_CONT(x)             ((((unsigned long) x) >> 52) & UL(0x1))
++#define TT_PAGE_DBM(x)              ((((unsigned long) x) >> 51) & UL(0x1))
++#define TT_PAGE_nG(x)               ((((unsigned long) x) >> 11) & UL(0x1))
++#define TT_PAGE_AF(x)               ((((unsigned long) x) >> 10) & UL(0x1))
++#define TT_PAGE_SH(x)               ((((unsigned long) x) >> 8) & UL(0x3))
++#define TT_PAGE_AP(x)               ((((unsigned long) x) >> 6) & UL(0x3))
++#define TT_PAGE_NS(x)               ((((unsigned long) x) >> 5) & UL(0x1))
++#define TT_PAGE_ATTR(x)             ((((unsigned long) x) >> 2) & UL(0x7))
++
++void print_page_desc_attr(unsigned long addr) {
++    char *cont = TT_PAGE_CONT(addr) ? "contiguous s" : "non-contiguous";
++    char *dirt = TT_PAGE_DBM(addr) ? "dirty" : "NOT dirty";
++    char *nG   = TT_PAGE_nG(addr) ? "not global" : "global";
++    char *af   = TT_PAGE_AF(addr) ? "been accessed" : "not been accessed yet";
++    char *sh[4] = {"non-shareable", "CONSTRAINED UNPREDICTABLE", "outer shareable", "inner shareable"};
++    char *ap[4] = {"read/write from privileged EL", "read/write from EL0", "read-only from privileged EL", "read-only from EL0"};
++    char *ns = TT_PAGE_NS(addr) ? "secure access" : "non-secure access";
++    char **attr = vmalloc(sizeof(char *) * 0x100);
++
++	unsigned long mair = read_sysreg(mair_el1);
++    unsigned long attr_val = (mair >> TT_PAGE_ATTR(addr)) & 0xff;
++
++    attr[MAIR_ATTR_DEVICE_nGnRnE] = "nGnRnE device memory";
++    attr[MAIR_ATTR_DEVICE_nGnRE] = "nGnRE device memory";
++    attr[MAIR_ATTR_NORMAL_NC] = "non-sharable normal memory";
++    attr[MAIR_ATTR_NORMAL_TAGGED] = "tagged normal memory";
++    attr[MAIR_ATTR_NORMAL] = "normal memory";
++
++    printk(KERN_INFO "\n\n\n*****************Table descriptor attribute********************\n");
++    printk(KERN_INFO "Memory address: 0x%016lx", addr);
++    printk(KERN_INFO "The page belongs to a %s sequence of pages\n", cont);
++    printk(KERN_INFO "The page is %s\n", dirt);
++    printk(KERN_INFO "The page is %s\n", nG);
++    printk(KERN_INFO "The page has %s\n", af);
++    printk(KERN_INFO "The shareability of this page is %s\n", sh[TT_PAGE_SH(addr)]);
++    printk(KERN_INFO "The access rights of this page is %s\n", ap[TT_PAGE_AP(addr)]);
++    printk(KERN_INFO "The memory is a %s", ns);
++    printk(KERN_INFO "The memory type is %s\n", attr[attr_val]);
++    printk(KERN_INFO "*****************Table descriptor attribute********************\n\n\n");
++
++    vfree(attr);
++}
++
++void print_table_desc_attr(unsigned long entry, int level) {
++    char *ns = TT_TABLE_NS_BIT(entry) ? "secure" : "non-secure";
++    char *ap[4] = {"read/write from privileged EL", "read/write from EL0", "read-only from privileged EL", "read-only from EL0"};
++    char *xn = TT_TABLE_XN_BIT(entry) ? "EL0 cannot execute" : "EL0 can execute";
++    char *pxn = TT_TABLE_PXN_BIT(entry) ? "priviledged execute never" : "priviledged level can execute";
++
++    printk(KERN_INFO "\n\n\n#################Table descriptor attribute###################\n");
++    printk(KERN_INFO "This L%d entry demands %s memory access in the subsequent level\n", level, ns);
++    printk(KERN_INFO "This L%d entry has access rights: %s\n", level, ap[TT_TABLE_AP_BIT(entry)]);
++    printk(KERN_INFO "This L%d entry has user execute right: %s\n", level, xn);
++    printk(KERN_INFO "This L%d entry has priviledged level execute right: %s\n", level, pxn);
++    printk(KERN_INFO "#################Table descriptor attribute###################\n\n\n");
++}
++
++SYSCALL_DEFINE1(get_addr_info, void *, addr)
++{
++	unsigned long ttbr0 = read_sysreg(ttbr0_el1);
++    unsigned long ttbr_addr = (ttbr0 & TTBR_BADDR_MASK);
++    void *p = __va(ttbr_addr);
++
++	unsigned long entry_l0 = *((unsigned long *) (p + VA_L0_INDEX(addr)));
++    unsigned long entry_l1 = *((unsigned long *) (__va((entry_l0 & TT_TABLE_DESC_ADDR_MASK) + VA_L1_INDEX(addr))));
++    unsigned long entry_l2 = *((unsigned long *) (__va((entry_l1 & TT_TABLE_DESC_ADDR_MASK) + VA_L2_INDEX(addr))));
++    unsigned long entry_l3 = *((unsigned long *) (__va((entry_l2 & TT_TABLE_DESC_ADDR_MASK) + VA_L3_INDEX(addr))));
++    unsigned long phys = (entry_l3 & TT_PAGE_DESC_ADDR_MASK) + VA_BITS_FIELD(addr);
++	unsigned long verify = ((unsigned long) __va(phys));
++
++	printk(KERN_INFO "The L0 entry in the translation walk is 0x%016lx\n", entry_l0);
++    print_table_desc_attr(entry_l0, 0);
++
++    printk(KERN_INFO "The L1 entry in the translation walk is 0x%016lx\n", entry_l1);
++    print_table_desc_attr(entry_l1, 1);
++
++    printk(KERN_INFO "The L2 entry in the translation walk is 0x%016lx\n", entry_l2);
++    print_table_desc_attr(entry_l2, 2);
++
++    printk(KERN_INFO "The L3 entry in the translation walk is 0x%016lx\n", entry_l3);
++    print_page_desc_attr(entry_l3);
++
++	printk(KERN_INFO "The physical address is 0x%016lx\n", phys);
++	printk(KERN_INFO "The virtual address is 0x%016lx\n", verify);
++
++	return verify;
+ }
+\ No newline at end of file
+-- 
+2.25.1
+
